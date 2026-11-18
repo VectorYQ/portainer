@@ -17238,7 +17238,7 @@ paths:
         "403":
           description: Permission denied
         "404":
-          description: endpoint not found
+          description: endpoint not found, or service not found or not accessible
         "500":
           description: Server error
       security:
@@ -24043,10 +24043,11 @@ paths:
         name: id
         required: true
         type: integer
-      - description: Environment identifier
+      - description: Environment(endpoint) identifier the stack belongs to. It can
+          only be used by an administrator to bind a legacy stack that has no environment
+          recorded.
         in: query
         name: endpointId
-        required: true
         type: integer
       - description: Stack details
         in: body
@@ -24172,9 +24173,9 @@ paths:
         name: id
         required: true
         type: integer
-      - description: Stacks created before version 1.18.0 might not have an associated
-          environment(endpoint) identifier. Use this optional parameter to set the
-          environment(endpoint) identifier used by the stack.
+      - description: Environment(Endpoint) identifier the stack belongs to. It can
+          only be used by an administrator to bind a legacy stack that has no environment
+          recorded.
         in: query
         name: endpointId
         type: integer
@@ -24219,9 +24220,9 @@ paths:
         name: id
         required: true
         type: integer
-      - description: Stacks created before version 1.18.0 might not have an associated
-          environment(endpoint) identifier. Use this optional parameter to set the
-          environment(endpoint) identifier used by the stack.
+      - description: Environment(Endpoint) identifier the stack belongs to. It can
+          only be used by an administrator to bind a legacy stack that has no environment
+          recorded.
         in: query
         name: endpointId
         type: integer
@@ -24316,7 +24317,7 @@ paths:
         name: id
         required: true
         type: integer
-      - description: Environment identifier
+      - description: Environment(Endpoint) identifier the stack belongs to
         in: query
         name: endpointId
         required: true
@@ -24354,7 +24355,7 @@ paths:
         name: id
         required: true
         type: integer
-      - description: Environment identifier
+      - description: Environment(Endpoint) identifier the stack belongs to
         in: query
         name: endpointId
         required: true
@@ -26289,6 +26290,10 @@ paths:
           description: OK
         "400":
           description: Bad Request
+        "403":
+          description: Forbidden
+        "404":
+          description: Not Found
         "409":
           description: Conflict
         "500":

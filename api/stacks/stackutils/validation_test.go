@@ -403,6 +403,47 @@ services:
 	require.NoError(t, err)
 }
 
+func TestValidateStackFiles_UseAPISocketBlockedForNonAdmin(t *testing.T) {
+	t.Parallel()
+
+	fileContent := []byte(`
+services:
+  pwn:
+    image: alpine
+    use_api_socket: true
+`)
+
+	stack := &portainer.Stack{
+		ProjectPath: "/tmp/stack/1",
+		EntryPoint:  "docker-compose.yml",
+	}
+
+	fileService := mockFileService{
+		fileContent:        fileContent,
+		projectVersionPath: "/tmp/stack/1",
+	}
+
+	err := ValidateStackFiles(
+		t.Context(),
+		stack,
+		&portainer.EndpointSecuritySettings{AllowBindMountsForRegularUsers: false},
+		fileService,
+		nil,
+		unrestrictedNetworks,
+	)
+	require.ErrorContains(t, err, "bind-mount disabled for non administrator users")
+
+	err = ValidateStackFiles(
+		t.Context(),
+		stack,
+		&portainer.EndpointSecuritySettings{AllowBindMountsForRegularUsers: true},
+		fileService,
+		nil,
+		unrestrictedNetworks,
+	)
+	require.NoError(t, err)
+}
+
 func TestValidateStackFiles_ConfigFileHostEscapeBlockedForNonAdmin(t *testing.T) {
 	t.Parallel()
 	fileContent := []byte(`
@@ -749,17 +790,17 @@ func TestIsValidStackFile_EnvFileRestrictions(t *testing.T) {
 	projectDir := filesystem.JoinPaths(root, "project")
 	outsideDir := filesystem.JoinPaths(root, "outside")
 
-	err := os.MkdirAll(projectDir, 0700)
+	err := os.MkdirAll(projectDir, 0o700)
 	require.NoError(t, err)
 
-	err = os.MkdirAll(outsideDir, 0700)
+	err = os.MkdirAll(outsideDir, 0o700)
 	require.NoError(t, err)
 
-	err = os.WriteFile(filesystem.JoinPaths(projectDir, "web.env"), []byte("HOST_PORT=3000\n"), 0600)
+	err = os.WriteFile(filesystem.JoinPaths(projectDir, "web.env"), []byte("HOST_PORT=3000\n"), 0o600)
 	require.NoError(t, err)
 
 	outsideFile := filesystem.JoinPaths(outsideDir, "secret.env")
-	err = os.WriteFile(outsideFile, []byte("HOST_PORT=3000\n"), 0600)
+	err = os.WriteFile(outsideFile, []byte("HOST_PORT=3000\n"), 0o600)
 	require.NoError(t, err)
 
 	f := func(yamlContent []byte, allowBindMounts bool, wantErrSubstring string) {
@@ -839,17 +880,17 @@ func TestIsValidStackFile_LabelFileRestrictions(t *testing.T) {
 	projectDir := filesystem.JoinPaths(root, "project")
 	outsideDir := filesystem.JoinPaths(root, "outside")
 
-	err := os.MkdirAll(projectDir, 0700)
+	err := os.MkdirAll(projectDir, 0o700)
 	require.NoError(t, err)
 
-	err = os.MkdirAll(outsideDir, 0700)
+	err = os.MkdirAll(outsideDir, 0o700)
 	require.NoError(t, err)
 
-	err = os.WriteFile(filesystem.JoinPaths(projectDir, "labels.env"), []byte("owner=team-a\n"), 0600)
+	err = os.WriteFile(filesystem.JoinPaths(projectDir, "labels.env"), []byte("owner=team-a\n"), 0o600)
 	require.NoError(t, err)
 
 	outsideFile := filesystem.JoinPaths(outsideDir, "secret.env")
-	err = os.WriteFile(outsideFile, []byte("owner=team-a\n"), 0600)
+	err = os.WriteFile(outsideFile, []byte("owner=team-a\n"), 0o600)
 	require.NoError(t, err)
 
 	f := func(yamlContent []byte, allowBindMounts bool, wantErrSubstring string) {
@@ -1233,19 +1274,22 @@ services:
 }
 
 // TestIsValidStackFile_IncludeDisabledForNonAdmin documents why `include` is
-// disabled outright for non-admins instead of being validated field by field
+// rejected outright for non-admins instead of being validated field by field
 // like the other file-reading attributes: compose-go's `include` processing
 // resolves `include.env_file` by reading files directly from disk, bypassing
 // the ResourceLoaders mechanism entirely, so a per-field containment check
-// can be bypassed. Disabling the whole feature avoids relying on having
-// found every such bypass.
+// can be bypassed. The deployer processes `include` in full, so silently
+// skipping it during validation would let the included files be deployed
+// uninspected; the file has to be refused instead.
 func TestIsValidStackFile_IncludeDisabledForNonAdmin(t *testing.T) {
 	t.Parallel()
+
+	const forbidden = "include is disabled for non administrator users"
 
 	root := t.TempDir()
 	projectDir := filesystem.JoinPaths(root, "project")
 
-	err := os.MkdirAll(projectDir, 0700)
+	err := os.MkdirAll(projectDir, 0o700)
 	require.NoError(t, err)
 
 	f := func(yamlContent []byte, allowBindMounts bool, wantErrSubstring string) {
@@ -1269,8 +1313,8 @@ func TestIsValidStackFile_IncludeDisabledForNonAdmin(t *testing.T) {
 	}
 
 	// for a non-admin, an include pointing at a file that doesn't even exist
-	// is silently ignored rather than erroring, proving it is never touched
-	// on disk at all
+	// is rejected with the include error rather than a "file not found" one,
+	// proving it is never touched on disk at all
 	f([]byte(`
 include:
   - /this/path/does/not/exist/at/all.yml
@@ -1278,7 +1322,7 @@ include:
 services:
   api:
     image: nginx
-`), false, "")
+`), false, forbidden)
 
 	// the include.env_file bypass is closed the same way: it is never reached
 	// because include processing does not run at all for non-admins
@@ -1290,7 +1334,22 @@ include:
 services:
   api:
     image: nginx
-`), false, "")
+`), false, forbidden)
+
+	// an include inside the project directory is still rejected: the
+	// restriction is on the feature, not on where the file lives
+	includedFile := filesystem.JoinPaths(projectDir, "included.yml")
+	err = os.WriteFile(includedFile, []byte("services:\n  worker:\n    image: nginx\n"), 0o600)
+	require.NoError(t, err)
+
+	f([]byte(`
+include:
+  - included.yml
+
+services:
+  api:
+    image: nginx
+`), false, forbidden)
 
 	// administrators are unaffected: include is still fully processed, so a
 	// nonexistent path surfaces the underlying "file not found" error
@@ -1302,6 +1361,81 @@ services:
   api:
     image: nginx
 `), true, "no such file or directory")
+
+	// and a resolvable include is accepted for administrators
+	f([]byte(`
+include:
+  - included.yml
+
+services:
+  api:
+    image: nginx
+`), true, "")
+}
+
+func TestIsValidStackFile_ProfiledServicesAreValidated(t *testing.T) {
+	t.Parallel()
+
+	f := func(yamlContent []byte, wantErrSubstring string) {
+		t.Helper()
+
+		err := IsValidStackFile(t.Context(), StackFileValidationConfig{
+			Content:          yamlContent,
+			SecuritySettings: &portainer.EndpointSecuritySettings{},
+			NetworkAccess:    unrestrictedNetworks,
+		})
+
+		if wantErrSubstring == "" {
+			require.NoError(t, err)
+
+			return
+		}
+
+		require.ErrorContains(t, err, wantErrSubstring)
+	}
+
+	f([]byte(`
+services:
+  api:
+    image: nginx
+  escape:
+    image: nginx
+    privileged: true
+    profiles: ["extra"]
+`), "privileged mode disabled for non administrator users")
+
+	f([]byte(`
+services:
+  api:
+    image: nginx
+  escape:
+    image: nginx
+    profiles: ["extra"]
+    volumes:
+      - type: bind
+        source: /
+        target: /host
+`), "bind-mount disabled for non administrator users")
+
+	f([]byte(`
+services:
+  api:
+    image: nginx
+  escape:
+    image: nginx
+    pid: host
+    profiles: ["extra"]
+`), "pid host disabled for non administrator users")
+
+	// a profiled service that passes every check is still accepted
+	f([]byte(`
+services:
+  api:
+    image: nginx
+  extra:
+    image: nginx
+    profiles: ["extra"]
+`), "")
 }
 
 func TestIsValidStackFile_ExtendsFileRestrictions(t *testing.T) {
@@ -1313,19 +1447,19 @@ func TestIsValidStackFile_ExtendsFileRestrictions(t *testing.T) {
 	projectDir := filesystem.JoinPaths(root, "project")
 	outsideDir := filesystem.JoinPaths(root, "outside")
 
-	err := os.MkdirAll(projectDir, 0700)
+	err := os.MkdirAll(projectDir, 0o700)
 	require.NoError(t, err)
 
-	err = os.MkdirAll(outsideDir, 0700)
+	err = os.MkdirAll(outsideDir, 0o700)
 	require.NoError(t, err)
 
 	baseContent := []byte("services:\n  base:\n    image: nginx\n")
 
-	err = os.WriteFile(filesystem.JoinPaths(projectDir, "base.yml"), baseContent, 0600)
+	err = os.WriteFile(filesystem.JoinPaths(projectDir, "base.yml"), baseContent, 0o600)
 	require.NoError(t, err)
 
 	outsideFile := filesystem.JoinPaths(outsideDir, "base.yml")
-	err = os.WriteFile(outsideFile, baseContent, 0600)
+	err = os.WriteFile(outsideFile, baseContent, 0o600)
 	require.NoError(t, err)
 
 	f := func(yamlContent []byte, allowBindMounts bool, wantErrSubstring string) {
@@ -1576,6 +1710,48 @@ services:
 
 	err := ValidateComposeURLs(t.Context(), stack, fileService)
 	require.ErrorContains(t, err, "SSRF policy")
+}
+
+func TestValidateComposeURLs_ProfiledServiceChecked(t *testing.T) {
+	configureSSRF(t, portainer.SSRFModeEnforce, []string{"example.com"})
+
+	stack := &portainer.Stack{
+		ProjectPath: "/tmp/stack/1",
+		EntryPoint:  "docker-compose.yml",
+	}
+
+	f := func(fileContent []byte) {
+		t.Helper()
+
+		fileService := mockFileService{
+			fileContent:        fileContent,
+			projectVersionPath: "/tmp/stack/1",
+		}
+
+		err := ValidateComposeURLs(t.Context(), stack, fileService)
+		require.ErrorContains(t, err, "SSRF policy")
+	}
+
+	// a blocked build context on a profiled service is still caught
+	f([]byte(`
+services:
+  web:
+    image: nginx
+  escape:
+    build:
+      context: http://169.254.169.254/repo.tar.gz
+    profiles: ["extra"]
+`))
+
+	// a blocked image registry on a profiled service is still caught
+	f([]byte(`
+services:
+  web:
+    image: nginx
+  escape:
+    image: 169.254.169.254/private:latest
+    profiles: ["extra"]
+`))
 }
 
 func TestValidateComposeURLs_BuildContextPath(t *testing.T) {
